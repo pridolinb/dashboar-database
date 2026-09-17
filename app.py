@@ -53,15 +53,15 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 
 @st.cache_resource
 def get_drive_service():
-    """Fungsi untuk inisialisasi koneksi ke Google Drive API."""
+    """Fungsi untuk inisialisasi koneksi ke Google Drive & Sheets API."""
     try:
         if "gcp_oauth" not in st.secrets:
-             return None, "Kredensial OAuth belum diisi di secrets."
+             return None, None, "Kredensial OAuth belum diisi di secrets."
              
         oauth_dict = st.secrets["gcp_oauth"]
         
         if not oauth_dict.get("refresh_token"):
-             return None, "Refresh token tidak ditemukan."
+             return None, None, "Refresh token tidak ditemukan."
              
         creds = Credentials(
             token=None,
@@ -71,13 +71,14 @@ def get_drive_service():
             client_secret=oauth_dict["client_secret"],
             scopes=SCOPES
         )
-        service = build('drive', 'v3', credentials=creds)
-        return service, "Berhasil"
+        drive_svc = build('drive', 'v3', credentials=creds)
+        sheets_svc = build('sheets', 'v4', credentials=creds)
+        return drive_svc, sheets_svc, "Berhasil"
     except Exception as e:
-        return None, str(e)
+        return None, None, str(e)
 
 # Inisialisasi Service
-service, status_msg = get_drive_service()
+service, sheets_service, status_msg = get_drive_service()
 
 # Ambil Folder ID dari secrets
 try:
@@ -259,6 +260,214 @@ def page_upload_data():
                     else:
                         st.error("Koneksi Google Drive belum siap.")
 
+# ==================== LOGIKA DATABASE GOOGLE SHEETS ====================
+DB_FILE_NAME = "Database_Universal_BPS"
+
+@st.cache_resource
+def get_or_create_database():
+    if not service or not sheets_service or not FOLDER_ID:
+        return None
+    
+    try:
+        # Cari file database
+        q = f"'{FOLDER_ID}' in parents and name = '{DB_FILE_NAME}' and trashed = false"
+        results = service.files().list(q=q, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        
+        if files:
+            return files[0]['id']
+        else:
+            # Buat file baru
+            file_metadata = {
+                'name': DB_FILE_NAME,
+                'mimeType': 'application/vnd.google-apps.spreadsheet',
+                'parents': [FOLDER_ID]
+            }
+            file = service.files().create(body=file_metadata, fields='id').execute()
+            spreadsheet_id = file.get('id')
+            
+            # Tambahkan header
+            headers = [['Tahun', 'Bulan', 'Kategori', 'Indikator', 'Satuan', 'Nilai', 'Keterangan']]
+            body = {'values': headers}
+            sheets_service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id, range='Sheet1!A1:G1',
+                valueInputOption='USER_ENTERED', body=body
+            ).execute()
+            return spreadsheet_id
+    except Exception as e:
+        st.error(f"Error Database: {e}")
+        return None
+
+def page_isi_data():
+    st.markdown('<p class="main-header">Isi Data Form</p>', unsafe_allow_html=True)
+    st.markdown("Masukkan data statistik baru ke dalam database.")
+    st.markdown("---")
+    
+    db_id = get_or_create_database()
+    if not db_id:
+        st.error("Database belum siap atau koneksi terputus.")
+        return
+        
+    st.info("Silakan isi tabel di bawah ini. Anda bisa menambah baris dengan mengklik area kosong di bawah tabel.")
+    
+    # Template DataFrame kosong
+    if "form_data" not in st.session_state:
+        st.session_state.form_data = pd.DataFrame(
+            columns=['Tahun', 'Bulan', 'Kategori', 'Indikator', 'Satuan', 'Nilai', 'Keterangan']
+        )
+        
+    edited_df = st.data_editor(
+        st.session_state.form_data, 
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Tahun": st.column_config.NumberColumn("Tahun", min_value=1900, max_value=2100, step=1, format="%d"),
+            "Bulan": st.column_config.NumberColumn("Bulan (1-12)", min_value=1, max_value=12, step=1),
+            "Nilai": st.column_config.NumberColumn("Nilai / Angka")
+        }
+    )
+    
+    # Filter baris yang kosong
+    valid_df = edited_df.dropna(how='all')
+    is_empty = valid_df.empty
+    
+    if st.button("💾 Simpan ke Database", type="primary", disabled=is_empty):
+        with st.spinner("Mengecek dan menyimpan data..."):
+            try:
+                # Ambil data yang sudah ada di database untuk cek duplikat
+                result = sheets_service.spreadsheets().values().get(
+                    spreadsheetId=db_id, range="Sheet1!A:G"
+                ).execute()
+                existing_rows = result.get('values', [])
+                
+                # Konversi input ke list of strings
+                new_rows = valid_df.fillna("").astype(str).values.tolist()
+                
+                # Saring data yang benar-benar baru (belum ada di database)
+                rows_to_insert = []
+                for row in new_rows:
+                    # Samakan panjang elemen jika perlu
+                    while len(row) < 7: row.append("")
+                    if row not in existing_rows:
+                        rows_to_insert.append(row)
+                        
+                if not rows_to_insert:
+                    st.warning("⚠️ Semua baris yang Anda masukkan sudah ada di database (Duplikat). Tidak ada data baru yang dikirim.")
+                else:
+                    body = {'values': rows_to_insert}
+                    
+                    sheets_service.spreadsheets().values().append(
+                        spreadsheetId=db_id,
+                        range="Sheet1!A:G",
+                        valueInputOption="USER_ENTERED",
+                        insertDataOption="INSERT_ROWS",
+                        body=body
+                    ).execute()
+                    
+                    st.success(f"✅ {len(rows_to_insert)} baris data baru berhasil disimpan ke database!")
+                    # Kosongkan form setelah simpan
+                    st.session_state.form_data = pd.DataFrame(
+                        columns=['Tahun', 'Bulan', 'Kategori', 'Indikator', 'Satuan', 'Nilai', 'Keterangan']
+                    )
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Gagal menyimpan data: {e}")
+
+def page_ekstrak_data():
+    st.markdown('<p class="main-header">Ekstrak & Unduh Data</p>', unsafe_allow_html=True)
+    st.markdown("Tarik data dari database dan ekspor menjadi file Excel.")
+    st.markdown("---")
+    
+    db_id = get_or_create_database()
+    if not db_id:
+        st.error("Database belum siap.")
+        return
+        
+    with st.spinner("Mengambil data dari database..."):
+        try:
+            result = sheets_service.spreadsheets().values().get(
+                spreadsheetId=db_id, range="Sheet1!A:G"
+            ).execute()
+            values = result.get('values', [])
+            
+            if not values or len(values) == 1:
+                st.info("Database masih kosong. Belum ada data yang bisa diekstrak.")
+                return
+                
+            # Jadikan baris pertama sebagai header
+            headers = values[0]
+            data = values[1:]
+            
+            # Sesuaikan jumlah kolom data dengan header jika ada yang terpotong
+            clean_data = []
+            for row in data:
+                row_copy = list(row)
+                while len(row_copy) < len(headers):
+                    row_copy.append("")
+                clean_data.append(row_copy)
+                
+            df = pd.DataFrame(clean_data, columns=headers)
+            
+            # --- FITUR FILTER ---
+            st.markdown("### 🔍 Filter Data")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                kategori_unik = ["Semua"] + list(df['Kategori'].unique()) if 'Kategori' in df.columns else ["Semua"]
+                pilih_kategori = st.selectbox("Kategori", kategori_unik)
+                
+            with col2:
+                indikator_unik = ["Semua"] + list(df['Indikator'].unique()) if 'Indikator' in df.columns else ["Semua"]
+                pilih_indikator = st.selectbox("Indikator", indikator_unik)
+                    
+            with col3:
+                tahun_unik = ["Semua"] + list(df['Tahun'].unique()) if 'Tahun' in df.columns else ["Semua"]
+                pilih_tahun = st.selectbox("Tahun", tahun_unik)
+                
+            with col4:
+                bulan_unik = ["Semua"] + list(df['Bulan'].unique()) if 'Bulan' in df.columns else ["Semua"]
+                pilih_bulan = st.selectbox("Bulan", bulan_unik)
+                
+            search_kw = st.text_input("🔍 Cari kata kunci (opsional):", placeholder="Contoh: padi")
+                    
+            # Terapkan filter
+            df_filtered = df.copy()
+            if pilih_kategori != "Semua":
+                df_filtered = df_filtered[df_filtered['Kategori'] == pilih_kategori]
+            if pilih_indikator != "Semua":
+                df_filtered = df_filtered[df_filtered['Indikator'] == pilih_indikator]
+            if pilih_tahun != "Semua":
+                df_filtered = df_filtered[df_filtered['Tahun'] == pilih_tahun]
+            if pilih_bulan != "Semua":
+                df_filtered = df_filtered[df_filtered['Bulan'] == pilih_bulan]
+                
+            if search_kw:
+                # Cari kata kunci di seluruh kolom
+                mask = df_filtered.apply(lambda row: row.astype(str).str.contains(search_kw, case=False).any(), axis=1)
+                df_filtered = df_filtered[mask]
+                
+            st.markdown("### 📊 Pratinjau Data")
+            st.dataframe(df_filtered, use_container_width=True)
+            st.caption(f"Menampilkan {len(df_filtered)} baris data hasil filter (dari total {len(df)} baris).")
+            
+            # --- EKSPOR KE EXCEL ---
+            if not df_filtered.empty:
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_filtered.to_excel(writer, index=False, sheet_name='Data_BPS')
+                excel_data = output.getvalue()
+                
+                st.download_button(
+                    label="⬇️ Unduh sebagai Excel (.xlsx)",
+                    data=excel_data,
+                    file_name=f"Ekstrak_Data_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
+                )
+                
+        except Exception as e:
+            st.error(f"Gagal memuat data: {e}")
 
 
 # ==================== KONFIGURASI NAVIGASI ====================
@@ -266,9 +475,11 @@ def page_upload_data():
 pg_beranda = st.Page(page_beranda, title="Beranda", icon="🏠", default=True)
 pg_semua = st.Page(page_semua_data, title="Semua Data", icon="📂")
 pg_cari = st.Page(page_cari_data, title="Cari Data", icon="🔍")
-pg_upload = st.Page(page_upload_data, title="Upload Data", icon="📤")
+pg_upload = st.Page(page_upload_data, title="Upload File", icon="📤")
+pg_isi_data = st.Page(page_isi_data, title="Isi Data Form", icon="📝")
+pg_ekstrak_data = st.Page(page_ekstrak_data, title="Tarik/Ekstrak Data", icon="📊")
 
-pg = st.navigation([pg_beranda, pg_semua, pg_cari, pg_upload])
+pg = st.navigation([pg_beranda, pg_semua, pg_cari, pg_upload, pg_isi_data, pg_ekstrak_data])
 
 # ==================== UI SIDEBAR (STATUS DI BAWAH MENU) ====================
 
