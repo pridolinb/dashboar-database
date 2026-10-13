@@ -9,11 +9,33 @@ from google.oauth2.credentials import Credentials
 import openpyxl
 
 # Konfigurasi Page Streamlit
-st.set_page_config(page_title="Database BPS | Dashboard", page_icon="🗄️", layout="wide")
+st.set_page_config(page_title="SANDEQ | Dashboard PDRB BPS", page_icon="🗄️", layout="wide")
+
+# Logo dan Nama Sistem di Kiri Atas (Tepat di atas menu navigasi)
+st.logo("sandeq_logo.svg", icon_image="sandeq_icon.svg", size="large")
 
 # Custom CSS untuk mempercantik UI dan memperbesar font navigasi
 st.markdown("""
 <style>
+    /* Styling Logo Sandeq di bagian atas sidebar */
+    [data-testid="stSidebarHeader"] {
+        padding-top: 1.5rem !important;
+        padding-bottom: 0.5rem !important;
+        height: auto !important;
+    }
+    [data-testid="stSidebarLogo"] {
+        height: auto !important;
+        max-height: none !important;
+        width: 100% !important;
+    }
+    [data-testid="stSidebarLogo"] img {
+        height: auto !important;
+        max-height: 110px !important;
+        width: 100% !important;
+        object-fit: contain !important;
+        object-position: left center !important;
+    }
+
     /* CSS untuk memperbesar Menu Navigasi */
     [data-testid="stSidebarNavItems"] li {
         font-size: 1.25rem !important; 
@@ -86,11 +108,116 @@ try:
 except Exception:
     FOLDER_ID = ""
 
-def upload_file_to_drive(file_obj, filename, mimetype, app_properties=None):
+TRIWULAN_LIST = ["Triwulan 1", "Triwulan 2", "Triwulan 3", "Triwulan 4"]
+TRIWULAN_CODE = {
+    "Triwulan 1": "TW1",
+    "Triwulan 2": "TW2",
+    "Triwulan 3": "TW3",
+    "Triwulan 4": "TW4"
+}
+
+@st.cache_data(ttl=300)
+def get_or_create_subfolder(parent_id, folder_name):
+    """Mencari atau membuat subfolder di dalam parent_id jika belum ada."""
+    if not service or not parent_id:
+        return None
+    try:
+        q = f"'{parent_id}' in parents and name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        res = service.files().list(q=q, fields="files(id, name)").execute()
+        files = res.get('files', [])
+        if files:
+            return files[0]['id']
+            
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [parent_id]
+        }
+        created = service.files().create(body=file_metadata, fields='id').execute()
+        return created.get('id')
+    except Exception as e:
+        return None
+
+def get_triwulan_folder_id(year, triwulan):
+    """Mendapatkan ID subfolder Triwulan di dalam folder Tahun (Opsi A)."""
+    if not FOLDER_ID:
+        return None
+    year_folder_id = get_or_create_subfolder(FOLDER_ID, str(year))
+    if not year_folder_id:
+        return None
+    tw_folder_id = get_or_create_subfolder(year_folder_id, triwulan)
+    return tw_folder_id
+
+def format_sandeq_filename(year, triwulan, filename):
+    """Memformat nama file otomatis agar diawali {Tahun}_{TW}_{NamaFile}."""
+    tw_code = TRIWULAN_CODE.get(triwulan, "TW1")
+    prefix = f"{year}_{tw_code}_"
+    clean_name = filename.strip()
+    if clean_name.startswith(prefix):
+        return clean_name
+    return f"{prefix}{clean_name}"
+
+@st.cache_data(ttl=60)
+def get_available_years():
+    """Mengambil daftar tahun yang tersedia di Drive atau default beberapa tahun terkini."""
+    curr = datetime.now().year
+    years = {str(curr), str(curr - 1), str(curr - 2), str(curr + 1)}
+    if service and FOLDER_ID:
+        try:
+            q = f"'{FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            res = service.files().list(q=q, fields="files(id, name)").execute()
+            for f in res.get('files', []):
+                if f['name'].isdigit():
+                    years.add(f['name'])
+        except Exception:
+            pass
+    return sorted(list(years), reverse=True)
+
+def get_search_target_folders(year="Semua", triwulan="Semua"):
+    """Mengambil daftar folder ID target berdasarkan filter Tahun dan Triwulan."""
+    if not service or not FOLDER_ID:
+        return []
+        
+    if year != "Semua" and triwulan != "Semua":
+        fid = get_triwulan_folder_id(year, triwulan)
+        return [fid] if fid else []
+        
+    target_ids = []
+    
+    # Ambil folder-folder tahun di bawah FOLDER_ID
+    try:
+        q = f"'{FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        res = service.files().list(q=q, fields="files(id, name)").execute()
+        year_folders = res.get('files', [])
+    except Exception:
+        year_folders = []
+        
+    if year != "Semua":
+        matched_years = [f for f in year_folders if f['name'] == str(year)]
+    else:
+        matched_years = year_folders
+        # Sertakan FOLDER_ID langsung agar file lama yang tersimpan di root tetap terbaca saat pilih 'Semua'
+        target_ids.append(FOLDER_ID)
+        
+    for yf in matched_years:
+        try:
+            q_tw = f"'{yf['id']}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            res_tw = service.files().list(q=q_tw, fields="files(id, name)").execute()
+            tw_folders = res_tw.get('files', [])
+            for twf in tw_folders:
+                if triwulan == "Semua" or twf['name'] == triwulan:
+                    target_ids.append(twf['id'])
+        except Exception:
+            pass
+            
+    return target_ids
+
+def upload_file_to_drive(file_obj, filename, mimetype, target_folder_id=None, app_properties=None):
     if not service or not FOLDER_ID:
         return False, "Google Drive belum terkonfigurasi."
     try:
-        file_metadata = {'name': filename, 'parents': [FOLDER_ID]}
+        dest_folder = target_folder_id if target_folder_id else FOLDER_ID
+        file_metadata = {'name': filename, 'parents': [dest_folder]}
         if app_properties:
             file_metadata['appProperties'] = app_properties
             
@@ -103,11 +230,20 @@ def upload_file_to_drive(file_obj, filename, mimetype, app_properties=None):
         return False, str(e)
 
 @st.cache_data(ttl=60) # Cache hasil pencarian selama 60 detik agar lebih cepat
-def search_files_in_drive(query="", mime_type=None, app_properties=None):
+def search_files_in_drive(query="", mime_type=None, app_properties=None, year="Semua", triwulan="Semua"):
     if not service or not FOLDER_ID:
         return []
     try:
-        q = f"'{FOLDER_ID}' in parents and trashed = false"
+        target_folders = get_search_target_folders(year, triwulan)
+        if not target_folders:
+            return []
+            
+        if len(target_folders) == 1:
+            parents_q = f"'{target_folders[0]}' in parents"
+        else:
+            parents_q = "(" + " or ".join([f"'{fid}' in parents" for fid in target_folders]) + ")"
+            
+        q = f"{parents_q} and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
         if query:
             q += f" and name contains '{query}'"
         if mime_type:
@@ -175,8 +311,8 @@ def display_file_card(file):
 # ==================== FUNGSI HALAMAN ====================
 
 def page_beranda():
-    st.markdown('<p class="main-header">Selamat Datang di Database BPS 🗄️</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Pusat pengelolaan dan penyimpanan data terpadu Anda.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="main-header">Selamat Datang di SANDEQ 🗄️</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Sistem Administrasi Data Elektronik Quartal PDRB - BPS Provinsi Sulawesi Barat</p>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns(3)
     
@@ -194,35 +330,37 @@ def page_beranda():
     st.markdown("---")
     st.markdown("### 📌 Fitur Utama")
     st.markdown("""
-    - **📂 Semua Data**: Lihat seluruh daftar file yang ada di direktori penyimpanan Anda.
-    - **🔍 Cari Data**: Temukan file spesifik dengan cepat menggunakan kata kunci.
-    - **📤 Upload File**: Unggah file dari perangkat Anda.
-    - **📝 Isi Data Form**: Buat tabel Excel khusus langsung dari dashboard.
+    - **📂 Semua Data**: Lihat seluruh file berdasarkan filter Tahun dan Triwulan.
+    - **📤 Upload File**: Unggah file dari perangkat Anda ke folder Tahun > Triwulan yang dipilih.
+    - **📝 Isi Data Form**: Buat tabel Excel fleksibel langsung dari dashboard dan simpan per Triwulan.
+    - **📊 Tarik/Ekstrak Data**: Buka, saring, dan unduh data Excel berdasarkan periode Triwulan.
     """)
 
 def page_semua_data():
     st.markdown('<p class="main-header">Semua Data</p>', unsafe_allow_html=True)
-    st.markdown("Lihat, cari, dan kelola semua file yang ada di penyimpanan Drive Anda.")
+    st.markdown("Lihat, cari, dan kelola semua file yang ada di penyimpanan Drive Anda berdasarkan Tahun dan Triwulan.")
     st.markdown("---")
     
-    # Fitur pencarian disatukan di sini
-    col_search, col_sort = st.columns([3, 1])
+    # Filter pencarian, Tahun, Triwulan, dan Pengurutan
+    col_search, col_yr, col_tw, col_sort = st.columns([2.5, 1, 1, 1])
     with col_search:
         search_query = st.text_input("🔍 Cari File:", placeholder="Ketik nama file yang ingin dicari...")
+    with col_yr:
+        filter_year = st.selectbox("Tahun:", ["Semua"] + get_available_years())
+    with col_tw:
+        filter_tw = st.selectbox("Triwulan:", ["Semua"] + TRIWULAN_LIST)
+    with col_sort:
+        sort_by = st.selectbox("Urutkan:", ["Terbaru", "Terlama", "Nama (A-Z)"])
     
     with st.spinner("Memuat data dari Drive..."):
-        # Jika ada query, cari berdasarkan query. Jika tidak, ambil semua.
-        files = search_files_in_drive(search_query)
+        files = search_files_in_drive(search_query, year=filter_year, triwulan=filter_tw)
         
         if not files:
             if search_query:
                 st.warning(f"Tidak ditemukan file dengan nama yang mengandung '{search_query}'.")
             else:
-                st.info("Penyimpanan kosong. Belum ada file yang diunggah.")
+                st.info("Tidak ada file pada periode/folder yang dipilih.")
         else:
-            with col_sort:
-                sort_by = st.selectbox("Urutkan:", ["Terbaru", "Terlama", "Nama (A-Z)"])
-            
             if sort_by == "Terbaru":
                 files = sorted(files, key=lambda x: x.get('createdTime', ''), reverse=True)
             elif sort_by == "Terlama":
@@ -241,7 +379,19 @@ def page_semua_data():
 
 def page_upload_data():
     st.markdown('<p class="main-header">Upload File</p>', unsafe_allow_html=True)
-    st.markdown("Pilih file dari komputer Anda untuk disimpan dengan aman ke Cloud.")
+    st.markdown("Pilih satu atau beberapa file dari komputer Anda untuk disimpan ke folder Tahun & Triwulan terkait.")
+    st.markdown("---")
+    
+    # Pilih Tahun dan Triwulan Target
+    col_yr, col_tw = st.columns(2)
+    with col_yr:
+        avail_years = get_available_years()
+        curr_year = str(datetime.now().year)
+        yr_idx = avail_years.index(curr_year) if curr_year in avail_years else 0
+        upload_year = st.selectbox("📅 Pilih Tahun:", avail_years, index=yr_idx)
+    with col_tw:
+        upload_tw = st.selectbox("📊 Pilih Triwulan:", TRIWULAN_LIST)
+        
     st.markdown("---")
     
     with st.container():
@@ -249,29 +399,56 @@ def page_upload_data():
         if 'uploader_key' not in st.session_state:
             st.session_state.uploader_key = 1
             
-        uploaded_file = st.file_uploader(
-            "Seret dan lepas file di sini, atau klik untuk memilih file.", 
+        uploaded_files = st.file_uploader(
+            "Seret dan lepas file di sini, atau klik untuk memilih file (bisa pilih banyak file sekaligus).", 
+            accept_multiple_files=True,
             help="Batas ukuran file mengikuti konfigurasi Streamlit Anda.",
             key=str(st.session_state.uploader_key)
         )
         
-        if uploaded_file is not None:
+        if uploaded_files:
+            tw_code = TRIWULAN_CODE.get(upload_tw, "TW1")
+            st.info(f"📁 Terpilih **{len(uploaded_files)}** file. Nama file akan otomatis diawali format: `{upload_year}_{tw_code}_` dan disimpan ke folder **{upload_year} > {upload_tw}**.")
             col1, col2 = st.columns([1, 4])
             with col1:
-                if st.button("☁️ Mulai Upload", type="primary", use_container_width=True):
+                if st.button("☁️ Mulai Upload Semua", type="primary", use_container_width=True):
                     if service and FOLDER_ID:
-                        with st.spinner("Sedang mengunggah ke Drive... mohon tunggu."):
-                            success, msg = upload_file_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type)
-                            
+                        total_files = len(uploaded_files)
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        berhasil = 0
+                        gagal = []
+                        
+                        # Dapatkan folder ID triwulan tujuan (otomatis buat jika belum ada)
+                        target_folder = get_triwulan_folder_id(upload_year, upload_tw)
+                        if not target_folder:
+                            st.error(f"Gagal menyiapkan folder Google Drive untuk {upload_year} > {upload_tw}.")
+                            return
+                        
+                        for idx, file in enumerate(uploaded_files):
+                            final_name = format_sandeq_filename(upload_year, upload_tw, file.name)
+                            status_text.text(f"Mengunggah ({idx + 1}/{total_files}): {final_name}...")
+                            success, msg = upload_file_to_drive(file, final_name, file.type, target_folder_id=target_folder)
                             if success:
-                                st.success(f"✅ Berhasil! File '{msg}' telah tersimpan.")
-                                # Hapus cache pencarian agar file baru langsung muncul
-                                search_files_in_drive.clear() 
-                                # Reset uploader
-                                st.session_state.uploader_key += 1
-                                st.rerun()
+                                berhasil += 1
                             else:
-                                st.error(f"❌ Gagal mengunggah file: {msg}")
+                                gagal.append((final_name, msg))
+                            progress_bar.progress((idx + 1) / total_files)
+                            
+                        # Hapus cache pencarian agar data terbaru langsung muncul
+                        search_files_in_drive.clear()
+                        
+                        if berhasil > 0:
+                            st.success(f"✅ Berhasil mengunggah **{berhasil}** file ke folder **{upload_year} > {upload_tw}**!")
+                        if gagal:
+                            for nama_file, err in gagal:
+                                st.error(f"❌ Gagal mengunggah '{nama_file}': {err}")
+                                
+                        if berhasil > 0 and not gagal:
+                            # Reset uploader otomatis jika semua sukses
+                            st.session_state.uploader_key += 1
+                            st.rerun()
                     else:
                         st.error("Koneksi Google Drive belum siap.")
 
@@ -306,10 +483,22 @@ def page_isi_data():
     )
     
     st.markdown("---")
+    st.markdown("### 📅 Pengaturan Periode Data")
+    col_yr, col_tw = st.columns(2)
+    with col_yr:
+        avail_years = get_available_years()
+        curr_year = str(datetime.now().year)
+        yr_idx = avail_years.index(curr_year) if curr_year in avail_years else 0
+        form_year = st.selectbox("Tahun Data:", avail_years, index=yr_idx, key="form_year")
+    with col_tw:
+        form_tw = st.selectbox("Triwulan Data:", TRIWULAN_LIST, key="form_tw")
+    
+    st.markdown("---")
     
     col_name, col_btn = st.columns([3, 1])
     with col_name:
-        file_name_input = st.text_input("Nama File Excel Anda:", help="Tidak perlu menuliskan .xlsx di belakangnya.")
+        tw_code = TRIWULAN_CODE.get(form_tw, "TW1")
+        file_name_input = st.text_input("Nama File Excel Anda:", placeholder="Contoh: Produksi_Padi", help=f"Nama file otomatis diawali '{form_year}_{tw_code}_'. Tidak perlu menuliskan .xlsx.")
     with col_btn:
         st.write("") # Spacer agar sejajar dengan input
         st.write("")
@@ -344,17 +533,29 @@ def page_isi_data():
                     data_rows.to_excel(writer, index=False, sheet_name='Sheet1')
                 output.seek(0)
                 
-                # 4. Upload ke Google Drive dengan metadata penanda (appProperties)
-                final_filename = file_name_input.strip() + ".xlsx"
+                # 4. Upload ke Google Drive ke subfolder Tahun > Triwulan
+                base_name = file_name_input.strip()
+                if not base_name.endswith('.xlsx'):
+                    base_name += ".xlsx"
+                final_filename = format_sandeq_filename(form_year, form_tw, base_name)
                 mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 
-                # Metadata ini akan membedakan file ini dari file Excel upload-an biasa
-                app_props = {"source": "isi_data_form"}
+                target_folder = get_triwulan_folder_id(form_year, form_tw)
+                if not target_folder:
+                    st.error(f"Gagal menyiapkan folder Google Drive untuk {form_year} > {form_tw}.")
+                    return
                 
-                success, msg = upload_file_to_drive(output, final_filename, mime, app_properties=app_props)
+                # Metadata ini akan membedakan file ini dari file Excel upload-an biasa
+                app_props = {
+                    "source": "isi_data_form",
+                    "year": str(form_year),
+                    "triwulan": form_tw
+                }
+                
+                success, msg = upload_file_to_drive(output, final_filename, mime, target_folder_id=target_folder, app_properties=app_props)
                 
                 if success:
-                    st.success(f"✅ Berhasil! Tabel telah disimpan sebagai '{msg}' di Google Drive.")
+                    st.success(f"✅ Berhasil! File '{msg}' telah disimpan ke folder {form_year} > {form_tw} di Google Drive.")
                     search_files_in_drive.clear()
                     
                     # Hapus data sebelumnya
@@ -370,20 +571,26 @@ def page_isi_data():
 
 def page_ekstrak_data():
     st.markdown('<p class="main-header">Tarik & Filter Excel</p>', unsafe_allow_html=True)
-    st.markdown("Lihat isi file Excel yang Anda buat melalui menu *Isi Data Form*, dan saring isinya.")
+    st.markdown("Lihat isi file Excel yang Anda buat melalui menu *Isi Data Form*, dan saring isinya berdasarkan periode Triwulan.")
     st.markdown("---")
     
     if not service:
         st.error("Koneksi Google Drive belum siap.")
         return
         
+    col_yr, col_tw = st.columns(2)
+    with col_yr:
+        filter_year = st.selectbox("Filter Tahun:", ["Semua"] + get_available_years(), key="ekstrak_year")
+    with col_tw:
+        filter_tw = st.selectbox("Filter Triwulan:", ["Semua"] + TRIWULAN_LIST, key="ekstrak_tw")
+        
     with st.spinner("Mencari daftar file formulir Excel di Drive..."):
         # Cari hanya file berformat Excel (.xlsx) yang dibuat melalui Isi Data Form
         excel_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        files = search_files_in_drive("", mime_type=excel_mime, app_properties={"source": "isi_data_form"})
+        files = search_files_in_drive("", mime_type=excel_mime, app_properties={"source": "isi_data_form"}, year=filter_year, triwulan=filter_tw)
         
     if not files:
-        st.info("Belum ada file Excel yang Anda buat melalui 'Isi Data Form'.")
+        st.info("Belum ada file Excel formulir yang cocok dengan filter periode Tahun & Triwulan yang dipilih.")
         return
         
     # Buat pilihan file
@@ -459,12 +666,11 @@ pg_ekstrak_data = st.Page(page_ekstrak_data, title="Tarik/Ekstrak Data", icon="�
 
 pg = st.navigation([pg_beranda, pg_semua, pg_upload, pg_isi_data, pg_ekstrak_data])
 
-# ==================== UI SIDEBAR (STATUS DI BAWAH MENU) ====================
+# ==================== UI SIDEBAR ====================
 
 with st.sidebar:
-    # Spacer untuk mendorong konten ke bawah
+    # Spacer untuk mendorong status ke bawah menu navigasi
     st.markdown('<div style="height: 25vh;"></div>', unsafe_allow_html=True)
-    
     st.markdown("---")
     st.markdown("### Status Sistem")
     if not service:
@@ -475,7 +681,7 @@ with st.sidebar:
         st.success("🟢 Terhubung ke Database")
         
     st.markdown("---")
-    st.caption("© 2026 Database BPS Dashboard")
+    st.caption("© 2026 SANDEQ - BPS")
 
 # Jalankan navigasi utama
 pg.run()
