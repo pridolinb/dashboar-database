@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 98" width="300" height="98">
+  <text x="2" y="36" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="38" font-weight="900" fill="#1E88E5" letter-spacing="2">SANDEQ</text>
+  <text x="2" y="60" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#334155">Sistem Administrasi Data Elektronik</text>
+  <text x="2" y="79" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13.5" font-weight="700" fill="#1E88E5">Quartal PDRB</text>
+  <line x1="2" y1="94" x2="298" y2="94" stroke="#CBD5E1" stroke-width="2" />
+</svg>
